@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2020, Quang Vu"
 #property link      "https://www.traderfoo.com"
-#property version   "1.00"
+#property version   "1.1"
 #include <Trade\PositionInfo.mqh>
 #include <Trade\Trade.mqh>
 #include <Trade\SymbolInfo.mqh>  
@@ -46,7 +46,7 @@ input ulong                 InpMagic                  = 88888888;          // Ma
 //---
 input group                 "Trading Settings";
 input ushort                InpBalancePercent         = 10;                // Balance stop percents (0 = No Stop)
-input ENUM_POS_OPEN_MODE    InpPositionOpenMode       = follow;            // Position Open Mode
+input ENUM_POS_OPEN_MODE    InpPositionOpenMode       = reverse;            // Position Open Mode
 input double                InpSpreadLimit            = 100;               // Spread Limit (in points)
 input ulong                 InpSlippageLimit          = 25;                // Slippage Limit(in points)
 //---
@@ -87,11 +87,20 @@ input group                 "Fibo Settings"
 input bool                  InpFiboDisplay            = true;              // Display Fibo on chart
 input color                 InpFiboColor              = clrYellow;         // Color
 //---
-input group                 "Indicator RSI"
+input group                 "RSI Info Settings"
 input int                   InpRSIPeriod              = 12;                // RSI period
 input ENUM_APPLIED_PRICE    InpRSIApplied_Price       = PRICE_TYPICAL;     // RSI applied price 
+//---
+input group                 "RSI Trading Settings";
 input int                   InpRSIValueCheckForBuy    = 20;                // RSI Value Check For Buy (<=)
 input int                   InpRSIValueCheckForSell   = 80;                // RSI Value Check For Sell (>=)
+//---
+input group                 "Pinbar Trading Settings"
+input double                InpMinRangerHiLo          = 5;                 // HiLo Min Ranger (in pips) 
+input ushort                InpMinTailPercent         = 65;                // Tail Min Percents 
+input ushort                InpMinNosePercent         = 5;                 // Nose Min Percents
+input ushort                InpMinBodyPercent         = 10;                // Body Min Percents
+
 //---
 double                      ExtStopLoss               = 0.0;
 double                      ExtTakeProfit             = 0.0;
@@ -99,7 +108,6 @@ double                      ExtTrailingStop           = 0.0;
 double                      ExtTrailingStep           = 0.0;
 double                      ExtBalanceTP              = 0.0;
 double                      ExtBalanceSL              = 0.0;
-double                      ExtDistancePriceOpen      = 0.0;
 //---
 double                      m_adjusted_point;                              // point value adjusted for 3 or 5 points
 //---
@@ -121,6 +129,22 @@ datetime                    zigzag_time_b;
 int                         rsi_handler;
 double                      rsi_array[]; 
 string                      hours_array[];
+//---
+double                      pinbar_open;
+double                      pinbar_high;
+double                      pinbar_low;
+double                      pinbar_close;
+double                      hilo_rangers;
+double                      body_rangers;
+double                      body_percent;
+
+double                      upper_rangers;
+double                      upper_percent;
+double                      lower_rangers;
+double                      lower_percent;
+datetime                    candle_datetime;
+
+
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
@@ -156,8 +180,7 @@ int OnInit() {
     ExtStopLoss = InpStopLoss * m_adjusted_point;
     ExtTakeProfit = InpTakeProfit * m_adjusted_point;
     ExtTrailingStop = InpTrailingStop * m_adjusted_point;
-    ExtTrailingStep = InpTrailingStep * m_adjusted_point;
-    
+    ExtTrailingStep = InpTrailingStep * m_adjusted_point;    
     
     //---
     ExtBalanceTP = m_account.Balance() + (m_account.Balance() * InpBalancePercent/100);
@@ -199,7 +222,7 @@ int OnInit() {
       return INIT_FAILED;
     } 
     InitHoursArray();
-    Print(hours_array[0] );
+    //Print(hours_array[0] );
     return (INIT_SUCCEEDED);
 }
 //+------------------------------------------------------------------+
@@ -784,50 +807,88 @@ void SetupConditions() {
    }
    ArraySetAsSeries(rsi_array,true);
    CopyBuffer(rsi_handler,0,0,3, rsi_array); 
+   //---   
+   ArraySetAsSeries(rates,true);
+   CopyRates(m_symbol.Name(),_Period, 0, 2, rates);
+   hilo_rangers = rates[1].high - rates[1].low;
+   pinbar_open = rates[1].open;
+   pinbar_high = rates[1].high;
+   pinbar_low = rates[1].low;
+   pinbar_close = rates[1].close;
+   
+   candle_datetime = rates[1].time;
+   
+   lower_percent = 0;
+   upper_percent = 0;
+   upper_rangers = 0.0;
+   lower_rangers = 0.0 ;     
+   body_percent = 0;
+   body_rangers = 0.0;
+   
+   if(hilo_rangers > 0){
+      if(pinbar_close > pinbar_open) {
+         upper_rangers = pinbar_high - pinbar_close;
+         lower_rangers = pinbar_open - pinbar_low;
+         body_rangers = pinbar_close - pinbar_open;      
+      }
+      if(pinbar_close< pinbar_open){
+         upper_rangers = pinbar_high - pinbar_open;
+         lower_rangers = pinbar_close - pinbar_low;     
+         body_rangers = pinbar_open - pinbar_close;
+      }  
+      upper_percent = upper_rangers / hilo_rangers * 100;
+      lower_percent = lower_rangers / hilo_rangers * 100; 
+      body_percent = body_rangers / hilo_rangers * 100;          
+   } 
    
    if(PositionsTotal() == 0) {          
       if(CheckSpread()){                          
          if(CheckZigZagForBuy()){
             if(CheckPriceForBuy()){
                if(CheckRSIForBuy()){
-                  zigzag_a = zigzag_array[1];
-                  zigzag_b = zigzag_array[0];
-                  zigzag_time_a = zigzag_time[1];
-                  zigzag_time_b = zigzag_time[0];
-                   
-                  if(InpZigZagDisplay){
-                     DrawZigZagTrend();
+                  if(CheckBullishPinBar()){
+                     zigzag_a = zigzag_array[1];
+                     zigzag_b = zigzag_array[0];
+                     zigzag_time_a = zigzag_time[1];
+                     zigzag_time_b = zigzag_time[0];
+                     DrawVLine("Bullish_Pinbar_"+ (string)candle_datetime, candle_datetime,pinbar_high,clrBlue);
+                     if(InpZigZagDisplay){
+                        DrawZigZagTrend();
+                     }
+                     if(InpFiboDisplay){
+                        DrawFibo();
+                     }
+                     if(InpPositionOpenMode == follow){
+                        m_need_open_sell = true;
+                     }
+                     if(InpPositionOpenMode == reverse){
+                        m_need_open_buy = true;
+                     } 
                   }
-                  if(InpFiboDisplay){
-                     DrawFibo();
-                  }
-                  if(InpPositionOpenMode == follow){
-                     m_need_open_sell = true;
-                  }
-                  if(InpPositionOpenMode == reverse){
-                     m_need_open_buy = true;
-                  } 
                }
             }     
          }            
          if(CheckZigZagForSell()){
             if(CheckPriceForSell()){
                if(CheckRSIForSell()){
-                  zigzag_a = zigzag_array[1];
-                  zigzag_b = zigzag_array[0];
-                  zigzag_time_a = zigzag_time[1];
-                  zigzag_time_b = zigzag_time[0];            
-                  if(InpZigZagDisplay){
-                     DrawZigZagTrend();
-                  }
-                  if(InpFiboDisplay){
-                     DrawFibo();
-                  }
-                  if(InpPositionOpenMode == follow){
-                     m_need_open_buy = true;
-                  }
-                  if(InpPositionOpenMode == reverse){
-                     m_need_open_sell = true;
+                  if(CheckBearishPinBar()){
+                     zigzag_a = zigzag_array[1];
+                     zigzag_b = zigzag_array[0];
+                     zigzag_time_a = zigzag_time[1];
+                     zigzag_time_b = zigzag_time[0];  
+                     DrawVLine("Bearish_Pinbar_"+ (string)candle_datetime, candle_datetime,pinbar_high,clrRed);          
+                     if(InpZigZagDisplay){
+                        DrawZigZagTrend();
+                     }
+                     if(InpFiboDisplay){
+                        DrawFibo();
+                     }
+                     if(InpPositionOpenMode == follow){
+                        m_need_open_buy = true;
+                     }
+                     if(InpPositionOpenMode == reverse){
+                        m_need_open_sell = true;
+                     }
                   }
                }
             }            
@@ -890,6 +951,27 @@ bool CheckRSIForSell(){
    if(rsi_array[1] >= InpRSIValueCheckForSell){  
       return true;
    }  
+   return false;
+}
+bool CheckBullishPinBar(){
+   if(upper_percent >= InpMinNosePercent){
+      if(lower_percent >= InpMinTailPercent){
+         if(body_percent >= InpMinBodyPercent){
+            return true;                
+         }
+      }
+   }
+   return false;
+}
+
+bool CheckBearishPinBar(){
+   if(upper_percent >= InpMinTailPercent){
+      if(lower_percent >= InpMinNosePercent){
+         if(body_percent >= InpMinBodyPercent){
+            return true;                     
+         }
+      }
+   }
    return false;
 }
 
@@ -1063,4 +1145,15 @@ void DrawFibo(){
    ObjectSetDouble(0,  "FIBO", OBJPROP_LEVELVALUE, 1, InpFiboOpenPositionLevel/100);   
    ObjectSetString(0,  "FIBO", OBJPROP_LEVELTEXT, 0, "0.0% (%$)");
    ObjectSetString(0,  "FIBO", OBJPROP_LEVELTEXT, 1, DoubleToString(InpFiboOpenPositionLevel,1) + ".0% (%$)");
+}
+
+void DrawVLine(string name,datetime time,double price,color inpcolor){
+   ObjectDelete(0,name);
+   if (!  ObjectCreate(0,name, OBJ_VLINE, 0, time, price))
+      return;    
+   
+   ObjectSetInteger(0,name, OBJPROP_STYLE, STYLE_DOT);
+   ObjectSetInteger(0,name, OBJPROP_COLOR, inpcolor);   
+   ObjectSetInteger(0,name, OBJPROP_BACK, true);
+
 }
